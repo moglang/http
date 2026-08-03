@@ -24,9 +24,6 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: linux-x86_64-gnu
-            runtime_ref: v0.1.6
-          - runner: ubuntu-latest
-            target: linux-x86_64-gnu
             runtime_ref: main
           - runner: ubuntu-24.04-arm
             target: linux-arm64-gnu
