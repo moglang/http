@@ -1,0 +1,19 @@
+const http = @import("github.com/moglang/http")
+
+const server http.Server = http.createServer()
+
+http.get(server, "/hello", fn(req http.Request, res http.Response) void {
+    http.text(res, "Hello from Mog")
+})
+
+http.get(server, "/stop", fn(req http.Request, res http.Response) void {
+    http.text(res, "stopping")
+    http.stop(server)
+})
+
+if (!http.listen(server, "127.0.0.1", 3000)) {
+    error("could not bind HTTP server")
+}
+
+print("Listening on http://127.0.0.1:3000")
+http.run(server)

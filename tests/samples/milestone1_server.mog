@@ -1,0 +1,48 @@
+const http = @import("github.com/moglang/http")
+
+const server http.Server = http.createServer()
+var savedPath str = ""
+
+http.get(server, "/hello", fn(req http.Request, res http.Response) void {
+    if (http.method(req) != "GET" || http.path(req) != "/hello" ||
+        http.url(req) != "/hello?source=integration") {
+        error("request snapshot mismatch")
+    }
+    savedPath = http.path(req)
+    http.status(res, 201i64)
+    http.header(res, "X-Milestone", "old")
+    http.header(res, "x-milestone", "one")
+    http.text(res, "hello")
+})
+
+http.get(server, "/snapshot", fn(req http.Request, res http.Response) void {
+    if (savedPath == "") {
+        error("missing retained request")
+    }
+    http.text(res, savedPath)
+})
+
+http.get(server, "/error", fn(req http.Request, res http.Response) void {
+    http.status(res, 202i64)
+    http.header(res, "X-Discarded", "yes")
+    error("intentional handler failure")
+})
+
+http.get(server, "/empty", fn(req http.Request, res http.Response) void {
+})
+
+http.head(server, "/head", fn(req http.Request, res http.Response) void {
+    http.text(res, "head-body")
+})
+
+http.get(server, "/stop", fn(req http.Request, res http.Response) void {
+    http.text(res, "stopping")
+    http.stop(server)
+})
+
+if (!http.listen(server, "127.0.0.1", __PORT__)) {
+    error("could not bind integration server")
+}
+print("HTTP_MILESTONE1_READY")
+http.run(server)
+print("HTTP_MILESTONE1_STOPPED")

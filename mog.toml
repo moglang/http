@@ -1,0 +1,17 @@
+kind = "native"
+module = "github.com/moglang/http"
+import_name = "http"
+namespace = "github"
+name = "http"
+version = "0.1.0"
+license = "GPL-3.0-only"
+abi_version = 3
+mog_runtime = "^0.1.6"
+author = "Mog contributors"
+description = "Native HTTP and WebSocket server package for Mog."
+repository = "https://github.com/moglang/http"
+dependencies = []
+
+[native]
+build = "cmake"
+targets = ["linux-x86_64-gnu", "linux-arm64-gnu", "macos-arm64"]

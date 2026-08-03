@@ -1,0 +1,32 @@
+package http
+
+@doc("HTTP server and event-loop owner.")
+@native_handle("ServerHandle")
+opaque type Server
+
+@doc("Copied HTTP request snapshot.")
+@native_handle("RequestHandle")
+opaque type Request
+
+@doc("Callback-scoped HTTP response.")
+@native_handle("ResponseHandle")
+opaque type Response
+
+fn createServer() Server
+fn listen(server Server, host str, port i64) bool
+fn run(server Server) void
+fn stop(server Server) void
+fn isListening(server Server) bool
+
+fn get(server Server, path str, callback fn(Request, Response) void) void
+fn head(server Server, path str, callback fn(Request, Response) void) void
+
+fn method(req Request) str
+fn url(req Request) str
+fn path(req Request) str
+
+fn status(res Response, code i64) void
+fn header(res Response, name str, value str) void
+fn text(res Response, body str) void
+fn isCompleted(res Response) bool
+fn isAborted(res Response) bool
