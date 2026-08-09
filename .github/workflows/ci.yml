@@ -65,7 +65,7 @@ jobs:
 
   validate:
     if: always()
-    needs: [compatibility, sanitizers]
+    needs: [compatibility, sanitizers, valgrind]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -73,9 +73,35 @@ jobs:
         env:
           COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
           SANITIZER_RESULT: ${{ needs.sanitizers.result }}
+          VALGRIND_RESULT: ${{ needs.valgrind.result }}
         run: |
           test "$COMPATIBILITY_RESULT" = success
           test "$SANITIZER_RESULT" = success
+          test "$VALGRIND_RESULT" = success
+
+  valgrind:
+    name: Valgrind smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: moglang/mog
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
+          path: .runtime/mog
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Build Mog runtime
+        run: |
+          cmake -S .runtime/mog -B .runtime/mog/build \
+            -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6
+          cmake --build .runtime/mog/build --target interpreter --parallel 2
+      - name: Run Valgrind smoke suite
+        env:
+          MOG_HTTP_VALGRIND: "1"
+          MOG_HTTP_CHURN_COUNT: "100"
+        run: ./tests/test_http_package.sh ./.runtime/mog/build/interpreter .
 
   sanitizers:
     name: ${{ matrix.name }}

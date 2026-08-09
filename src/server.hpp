@@ -12,6 +12,7 @@ struct us_listen_socket_t;
 namespace mog::http {
 
 struct WebSocketRouteState;
+struct WebSocketState;
 struct RequestState;
 struct ResponseState;
 
@@ -35,12 +36,16 @@ struct ServerState : std::enable_shared_from_this<ServerState> {
   bool run(std::string &error);
   void stop();
   bool isListening() const { return listening; }
+  void trackResponse(const std::shared_ptr<ResponseState> &response);
+  void trackSocket(const std::shared_ptr<WebSocketState> &socket);
 
   HostBridge host;
   std::unique_ptr<uWS::App> app;
   us_listen_socket_t *listenSocket = nullptr;
   std::vector<RouteState> routes;
   std::vector<std::shared_ptr<WebSocketRouteState>> webSocketRoutes;
+  std::vector<std::weak_ptr<ResponseState>> activeResponses;
+  std::vector<std::weak_ptr<WebSocketState>> activeSockets;
   size_t maxBodySize = 1024 * 1024;
   bool listening = false;
   bool running = false;
@@ -56,6 +61,7 @@ private:
                   const std::shared_ptr<RequestState> &request,
                   const std::shared_ptr<ResponseState> &response) noexcept;
   void closeNow();
+  void invalidateActiveStates();
   void releaseCallbacks();
 };
 

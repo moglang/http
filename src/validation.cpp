@@ -39,30 +39,39 @@ bool readI64(const ExprPackageValue &value, int64_t &out,
 }
 
 bool validRoutePattern(const std::string &pattern, std::string &error) {
+  std::vector<std::string> ignored;
+  return routeParameterNames(pattern, ignored, error);
+}
+
+bool routeParameterNames(const std::string &pattern,
+                         std::vector<std::string> &names, std::string &error) {
   if (pattern.empty() || pattern.front() != '/') {
     error = "route path must be non-empty and start with '/'";
     return false;
   }
 
   std::unordered_set<std::string> parameters;
-  for (size_t index = 0; index < pattern.size();) {
-    if (pattern[index] != ':') {
-      ++index;
-      continue;
+  names.clear();
+  for (size_t start = 1; start <= pattern.size();) {
+    const size_t end = pattern.find('/', start);
+    const size_t length =
+        end == std::string::npos ? pattern.size() - start : end - start;
+    const std::string_view segment(pattern.data() + start, length);
+    if (!segment.empty() && segment.front() == ':') {
+      const std::string name(segment.substr(1));
+      if (name.empty()) {
+        error = "route parameter names cannot be empty";
+        return false;
+      }
+      if (!parameters.insert(name).second) {
+        error = "route contains duplicate parameter '" + name + "'";
+        return false;
+      }
+      names.push_back(name);
     }
-    const size_t start = ++index;
-    while (index < pattern.size() && pattern[index] != '/') {
-      ++index;
-    }
-    const std::string name = pattern.substr(start, index - start);
-    if (name.empty()) {
-      error = "route parameter names cannot be empty";
-      return false;
-    }
-    if (!parameters.insert(name).second) {
-      error = "route contains duplicate parameter '" + name + "'";
-      return false;
-    }
+    if (end == std::string::npos)
+      break;
+    start = end + 1;
   }
   return true;
 }

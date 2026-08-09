@@ -168,14 +168,8 @@ bool registerWebSocket(const std::shared_ptr<ServerState> &server,
   if (!validRoutePattern(path, error))
     return false;
   std::vector<std::string> parameterNames;
-  for (size_t index = 0; index < path.size();) {
-    if (path[index++] != ':')
-      continue;
-    const size_t start = index;
-    while (index < path.size() && path[index] != '/')
-      ++index;
-    parameterNames.push_back(path.substr(start, index - start));
-  }
+  if (!routeParameterNames(path, parameterNames, error))
+    return false;
   route->registered = true;
   server->webSocketRoutes.push_back(route);
 
@@ -199,6 +193,7 @@ bool registerWebSocket(const std::shared_ptr<ServerState> &server,
             return;
           }
           auto socket = std::make_shared<WebSocketState>();
+          owner->trackSocket(socket);
           socket->server = owner;
           socket->route = route;
           const std::string_view remote = response->getRemoteAddressAsText();

@@ -16,6 +16,17 @@ import time
 import traceback
 
 
+def mog_command(mog: Path, *arguments: str) -> list[str]:
+    command = [str(mog), *arguments]
+    if os.environ.get("MOG_HTTP_VALGRIND") == "1":
+        return [
+            "valgrind", "--quiet", "--leak-check=full",
+            "--errors-for-leak-kinds=definite", "--error-exitcode=99",
+            *command,
+        ]
+    return command
+
+
 def fail(message: str, process: subprocess.Popen[str] | None = None) -> None:
     if process is not None:
         process.kill()
@@ -89,8 +100,8 @@ def recv_exact(connection: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def websocket_frame(opcode: int, payload: bytes) -> bytes:
-    first = 0x80 | opcode
+def websocket_frame(opcode: int, payload: bytes, *, final: bool = True) -> bytes:
+    first = (0x80 if final else 0) | opcode
     mask = b"\x12\x34\x56\x78"
     length = len(payload)
     if length < 126:
@@ -118,7 +129,7 @@ def read_websocket_frame(connection: socket.socket) -> tuple[int, bytes]:
     return opcode, payload
 
 
-def websocket_connect(port: int, target: str = "/ws") -> socket.socket:
+def websocket_connect(port: int, target: str = "/ws", *, expect_open: bool = True) -> socket.socket:
     connection = socket.create_connection(("127.0.0.1", port), timeout=3)
     key = base64.b64encode(b"mog-http-test-key").decode("ascii")
     request_bytes = (
@@ -142,10 +153,11 @@ def websocket_connect(port: int, target: str = "/ws") -> socket.socket:
     if b"sec-websocket-accept: " + expected.lower() not in response.lower():
         connection.close()
         raise RuntimeError("WebSocket accept key mismatch")
-    opcode, payload = read_websocket_frame(connection)
-    if opcode != 1 or payload != b"open":
-        connection.close()
-        raise RuntimeError(f"unexpected open frame: {opcode}, {payload!r}")
+    if expect_open:
+        opcode, payload = read_websocket_frame(connection)
+        if opcode != 1 or payload != b"open":
+            connection.close()
+            raise RuntimeError(f"unexpected open frame: {opcode}, {payload!r}")
     return connection
 
 
@@ -176,6 +188,67 @@ def wait_for_line(process: subprocess.Popen[str], marker: str, timeout: float) -
     fail(f"timed out waiting for {marker}", process)
 
 
+def run_source_case(
+    mog: Path, staged: Path, root: Path, name: str, source: str
+) -> subprocess.CompletedProcess[str]:
+    project = root / name
+    project.mkdir()
+    (project / "case.mog").write_text(source, encoding="utf-8")
+    (project / "mog.toml").write_text(
+        'kind = "project"\n'
+        f'name = "{name}"\n'
+        'version = "0.0.0"\n\n'
+        f'[dependencies]\n"github.com/moglang/http" = {{ path = "{staged}", version = "0.1.0" }}\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["MOG_CACHE_DIR"] = str(root / f"{name}-cache")
+    return subprocess.run(
+        mog_command(mog, "run", "--offline", "case.mog"), cwd=project,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+
+
+def run_example_smokes(mog: Path, package: Path, staged: Path, root: Path) -> None:
+    for name, marker in (
+        ("http_server", "Listening on"),
+        ("websocket_echo", "WebSocket echo listening"),
+    ):
+        port = free_port()
+        project = root / f"example-{name}"
+        project.mkdir()
+        source = (package / "examples" / f"{name}.mog").read_text(encoding="utf-8")
+        (project / "example.mog").write_text(source.replace("3000", str(port)), encoding="utf-8")
+        (project / "mog.toml").write_text(
+            'kind = "project"\n'
+            f'name = "example-{name}"\n'
+            'version = "0.0.0"\n\n'
+            f'[dependencies]\n"github.com/moglang/http" = {{ path = "{staged}", version = "0.1.0" }}\n',
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["MOG_CACHE_DIR"] = str(root / f"example-{name}-cache")
+        process = subprocess.Popen(
+            mog_command(mog, "run", "--offline", "example.mog"), cwd=project,
+            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            wait_for_line(process, marker, 30)
+            if name == "http_server":
+                status, _, body = request(port, "GET", "/hello")
+                if status != 200 or body != b"Hello from Mog":
+                    fail(f"HTTP example smoke failed: {status}, {body!r}", process)
+                request(port, "GET", "/stop")
+                process.wait(timeout=10)
+            else:
+                connection = websocket_connect(port, "/echo", expect_open=False)
+                websocket_send(connection, 1, b"example")
+                websocket_expect(connection, 1, b"example")
+                connection.close()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
 def run_full_suite(mog: Path, package: Path, library: Path) -> None:
     sample = package / "tests" / "samples" / "full_server.mog"
     port = free_port()
@@ -207,7 +280,7 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
         environment = os.environ.copy()
         environment["MOG_CACHE_DIR"] = str(cache)
         process = subprocess.Popen(
-            [str(mog), "run", "--offline", "server.mog"],
+            mog_command(mog, "run", "--offline", "server.mog"),
             cwd=project,
             env=environment,
             stdout=subprocess.PIPE,
@@ -217,11 +290,11 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
         try:
             wait_for_line(process, "HTTP_FULL_READY", 30)
 
-            binary_body = b"a\x00\xffz"
+            binary_body = b"a\x00\xff\nz"
             status, headers, body = request(
                 port,
                 "POST",
-                "/echo/42?q=hello+world&empty=",
+                "/echo/42?q=hello+world&empty=&first=one&first=two&encoded%20key=value%2Fok&bare",
                 [("X-Test", "first"), ("x-test", "second")],
                 binary_body,
                 split_body=True,
@@ -232,6 +305,20 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
                 fail(f"binary content type missing: {headers}", process)
             if not headers.get("x-remote"):
                 fail(f"remote address missing: {headers}", process)
+
+            status, _, body = request(port, "GET", "/get-body", body=b"get-body")
+            if status != 200 or body != b"get-body":
+                fail(f"GET request body failed: {status}, {body!r}", process)
+
+            aborted = socket.create_connection(("127.0.0.1", port), timeout=3)
+            aborted.sendall(
+                f"POST /abort HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 10\r\n\r\nabc".encode("ascii")
+            )
+            aborted.close()
+            time.sleep(0.02)
+            status, _, body = request(port, "GET", "/abort-count")
+            if status != 200 or body != b"0":
+                fail(f"aborted request invoked handler: {status}, {body!r}", process)
 
             status, _, body = request(port, "GET", "/saved")
             if status != 200 or body != binary_body:
@@ -248,6 +335,15 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             status, _, body = request(port, "TRACE", "/any")
             if status != 200 or body != b"TRACE":
                 fail(f"any route failed: {status}, {body!r}", process)
+            status, headers, body = request(port, "HEAD", "/any")
+            if status != 200 or body or headers.get("content-length") != "4":
+                fail(f"HEAD any fallback failed: {status}, {headers}, {body!r}", process)
+            status, _, body = request(port, "GET", "/literal:colon")
+            if status != 200 or body != b"literal":
+                fail(f"literal colon route failed: {status}, {body!r}", process)
+            status, _, body = request(port, "GET", "/empty-header", [("X-Empty", "")])
+            if status != 200 or body != b"empty":
+                fail(f"present-empty header failed: {status}, {body!r}", process)
 
             status, headers, body = request(port, "GET", "/json")
             if status != 200 or body != b"true" or headers.get("content-type") != "application/json; charset=utf-8":
@@ -261,17 +357,20 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             status, _, body = request(port, "GET", "/completed-error")
             if status != 200 or body != b"already sent":
                 fail(f"post-completion error policy failed: {status}, {body!r}", process)
-            for target in ("/bad-framing", "/bad-status-body", "/bad-redirect"):
+            for target in ("/bad-framing", "/bad-injection", "/bad-status", "/bad-status-body", "/bad-redirect", "/lifecycle-error"):
                 status, _, body = request(port, "GET", target)
                 if status != 500 or body != b"Internal Server Error":
                     fail(f"validation route {target} failed: {status}, {body!r}", process)
             status, _, body = request(port, "GET", "/bad-query?value=%GG")
             if status != 200 or body != b"null":
                 fail(f"malformed query behavior failed: {status}, {body!r}", process)
+            status, headers, body = request(port, "GET", "/custom-content-type")
+            if status != 200 or body != b"custom" or headers.get("content-type") != "application/x-mog":
+                fail(f"custom content type was not preserved: {status}, {headers}, {body!r}", process)
             status, _, _ = request(
                 port,
                 "POST",
-                "/echo/42?q=hello+world&empty=",
+                "/echo/42?q=hello+world&empty=&first=one&first=two&encoded%20key=value%2Fok&bare",
                 [("X-Test", "first")],
                 b"x" * 65,
                 split_body=True,
@@ -282,6 +381,9 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             first = websocket_connect(port)
             websocket_send(first, 1, b"hello")
             websocket_expect(first, 1, b"hello")
+            first.sendall(websocket_frame(1, b"frag", final=False))
+            first.sendall(websocket_frame(0, b"mented"))
+            websocket_expect(first, 1, b"fragmented")
             websocket_send(first, 2, bytes(range(256)))
             websocket_expect(first, 2, bytes(range(256)))
             websocket_send(first, 1, b"data")
@@ -299,6 +401,9 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             websocket_send(first, 1, b"publish")
             websocket_expect(first, 1, b"published")
             websocket_expect(second, 1, b"broadcast")
+            websocket_send(first, 1, b"publish-binary")
+            websocket_expect(first, 1, b"binary-published")
+            websocket_expect(second, 2, bytes((0, 127, 255)))
             websocket_send(second, 1, b"unsubscribe")
             websocket_expect(second, 1, b"unsubscribed")
             websocket_send(second, 8, (1000).to_bytes(2, "big") + b"bye")
@@ -312,6 +417,54 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             if close_opcode != 8 or int.from_bytes(close_payload[:2], "big") != 1011 or close_payload[2:] != b"handler error":
                 fail(f"WebSocket handler error policy failed: {close_opcode}, {close_payload!r}", process)
             first.close()
+
+            invalid_text = websocket_connect(port)
+            websocket_send(invalid_text, 1, b"invalid-text")
+            close_opcode, close_payload = read_websocket_frame(invalid_text)
+            if close_opcode != 8 or int.from_bytes(close_payload[:2], "big") != 1011:
+                fail(f"invalid outbound UTF-8 was accepted: {close_opcode}, {close_payload!r}", process)
+            invalid_text.close()
+
+            invalid_close = websocket_connect(port)
+            websocket_send(invalid_close, 1, b"invalid-close")
+            close_opcode, close_payload = read_websocket_frame(invalid_close)
+            if close_opcode != 8 or int.from_bytes(close_payload[:2], "big") != 1011:
+                fail(f"reserved close code was accepted: {close_opcode}, {close_payload!r}", process)
+            invalid_close.close()
+
+            for command in (b"long-close", b"invalid-close-utf8"):
+                invalid_reason = websocket_connect(port)
+                websocket_send(invalid_reason, 1, command)
+                close_opcode, close_payload = read_websocket_frame(invalid_reason)
+                if close_opcode != 8 or int.from_bytes(close_payload[:2], "big") != 1011:
+                    fail(f"invalid close reason was accepted: {command!r}, {close_payload!r}", process)
+                invalid_reason.close()
+
+            open_error = websocket_connect(port, "/ws-open-error", expect_open=False)
+            close_opcode, close_payload = read_websocket_frame(open_error)
+            if close_opcode != 8 or int.from_bytes(close_payload[:2], "big") != 1011:
+                fail(f"open callback failure was not contained: {close_opcode}, {close_payload!r}", process)
+            open_error.close()
+
+            if os.environ.get("MOG_HTTP_VALGRIND") != "1":
+                pressure = websocket_connect(port, "/ws-pressure", expect_open=False)
+                time.sleep(0.05)
+                pressure.settimeout(10)
+                pressure_ok = False
+                for _ in range(600):
+                    opcode, payload = read_websocket_frame(pressure)
+                    if opcode == 1 and payload == b"pressure-ok":
+                        pressure_ok = True
+                        break
+                    if opcode == 8:
+                        break
+                if not pressure_ok:
+                    fail("backpressure/drain scenario did not report all send outcomes", process)
+                websocket_send(pressure, 8, (1000).to_bytes(2, "big"))
+                try:
+                    read_websocket_frame(pressure)
+                finally:
+                    pressure.close()
 
             nested = websocket_connect(port)
             websocket_send(nested, 1, b"close-now")
@@ -338,7 +491,7 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
                 pass
             oversized.close()
 
-            for _ in range(1000):
+            for _ in range(int(os.environ.get("MOG_HTTP_CHURN_COUNT", "1000"))):
                 churn = websocket_connect(port)
                 websocket_send(churn, 8, (1000).to_bytes(2, "big"))
                 try:
@@ -346,9 +499,16 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
                 finally:
                     churn.close()
 
+            shutdown_socket = websocket_connect(port)
             status, _, body = request(port, "GET", "/stop")
             if status != 200 or body != b"stopping":
                 fail(f"full-suite stop failed: {status}, {body!r}", process)
+            try:
+                shutdown_socket.recv(1)
+            except (ConnectionResetError, OSError):
+                pass
+            finally:
+                shutdown_socket.close()
             process.wait(timeout=10)
             if process.returncode != 0:
                 fail("full server exited unsuccessfully", process)
@@ -401,7 +561,7 @@ def main() -> int:
         environment = os.environ.copy()
         environment["MOG_CACHE_DIR"] = str(cache)
         process = subprocess.Popen(
-            [str(mog), "run", "--offline", "server.mog"],
+            mog_command(mog, "run", "--offline", "server.mog"),
             cwd=project,
             env=environment,
             stdout=subprocess.PIPE,
@@ -410,6 +570,63 @@ def main() -> int:
         )
         try:
             wait_for_line(process, "HTTP_MILESTONE1_READY", 30)
+
+            stop_before_run = run_source_case(
+                mog, staged, root, "stop-before-run",
+                'const http = @import("github.com/moglang/http")\n'
+                'const server http.Server = http.createServer()\n'
+                'http.stop(server)\nhttp.stop(server)\nhttp.run(server)\nprint("STOP_BEFORE_RUN_OK")\n',
+            )
+            if stop_before_run.returncode != 0 or "STOP_BEFORE_RUN_OK" not in stop_before_run.stdout:
+                fail(f"stop-before-run failed: {stop_before_run.stdout}\n{stop_before_run.stderr}", process)
+
+            occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            occupied_port = occupied.getsockname()[1]
+            try:
+                bind_failure = run_source_case(
+                    mog, staged, root, "bind-failure",
+                    'const http = @import("github.com/moglang/http")\n'
+                    'const server http.Server = http.createServer()\n'
+                    f'if (http.listen(server, "127.0.0.1", {occupied_port}i64)) {{ error("unexpected bind") }}\n'
+                    'print("BIND_FAILURE_OK")\n',
+                )
+            finally:
+                occupied.close()
+            if bind_failure.returncode != 0 or "BIND_FAILURE_OK" not in bind_failure.stdout:
+                fail(f"bind-failure behavior failed: {bind_failure.stdout}\n{bind_failure.stderr}", process)
+
+            duplicate_route = run_source_case(
+                mog, staged, root, "duplicate-route",
+                'const http = @import("github.com/moglang/http")\n'
+                'const server http.Server = http.createServer()\n'
+                'http.get(server, "/:id/:id", fn(req http.Request, res http.Response) void { http.end(res) })\n',
+            )
+            if duplicate_route.returncode == 0 or "duplicate parameter" not in duplicate_route.stderr:
+                fail(f"duplicate route parameter was accepted: {duplicate_route.stdout}\n{duplicate_route.stderr}", process)
+
+            immutable_route = run_source_case(
+                mog, staged, root, "immutable-route",
+                'const http = @import("github.com/moglang/http")\n'
+                'const server http.Server = http.createServer()\n'
+                'const route http.WebSocketRoute = http.createWebSocketRoute()\n'
+                'http.websocket(server, "/ws", route)\n'
+                'http.setIdleTimeout(route, 8i64)\n',
+            )
+            if immutable_route.returncode == 0 or "immutable" not in immutable_route.stderr:
+                fail(f"registered WebSocket route remained mutable: {immutable_route.stdout}\n{immutable_route.stderr}", process)
+
+            finalizer_stress = run_source_case(
+                mog, staged, root, "server-finalizers",
+                'const http = @import("github.com/moglang/http")\n'
+                'var index i64 = 0i64\nwhile (index < 1000i64) {\n'
+                '  const server http.Server = http.createServer()\n  index = index + 1i64\n}\n'
+                'print("SERVER_FINALIZERS_OK")\n',
+            )
+            if finalizer_stress.returncode != 0 or "SERVER_FINALIZERS_OK" not in finalizer_stress.stdout:
+                fail(f"server finalizer stress failed: {finalizer_stress.stdout}\n{finalizer_stress.stderr}", process)
 
             status, headers, body = request(port, "GET", "/hello?source=integration")
             if status != 201 or body != b"hello":
@@ -439,6 +656,10 @@ def main() -> int:
             if status != 200 or body or headers.get("content-length") != "9":
                 fail(f"HEAD response failed: {status}, {headers}, {body!r}", process)
 
+            status, _, _ = request(port, "POST", "/default-limit", body=b"x" * (1024 * 1024 + 1))
+            if status != 413:
+                fail(f"default body limit or handler suppression failed: {status}", process)
+
             status, _, body = request(port, "GET", "/stop")
             if status != 200 or body != b"stopping":
                 fail(f"stop response failed: {status}, {body!r}", process)
@@ -450,6 +671,7 @@ def main() -> int:
             remaining_stdout = process.stdout.read()
             if "HTTP_MILESTONE1_STOPPED" not in remaining_stdout:
                 fail("run did not return after callback stop", process)
+            run_example_smokes(mog, package, staged, root)
         except Exception:
             if process.poll() is None:
                 process.kill()

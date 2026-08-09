@@ -5,6 +5,7 @@ http.setMaxBodySize(server, 64i64)
 
 var savedRequests Array<http.Request> = []
 var savedResponses Array<http.Response> = []
+var abortedHandlerCalls i64 = 0i64
 
 http.post(server, "/echo/:id", fn(req http.Request, res http.Response) void {
     savedRequests.push(req)
@@ -13,13 +14,29 @@ http.post(server, "/echo/:id", fn(req http.Request, res http.Response) void {
     const queryValue str? = http.query(req, "q")
     const emptyValue str? = http.query(req, "empty")
     const missingValue str? = http.query(req, "missing")
+    const firstValue str? = http.query(req, "first")
+    const encodedValue str? = http.query(req, "encoded key")
+    const bareValue str? = http.query(req, "bare")
     const header str? = http.headerValue(req, "X-TeSt")
     if (id == null || id != "42" || queryValue == null || queryValue != "hello world" ||
         emptyValue == null || emptyValue != "" || missingValue != null ||
+        firstValue == null || firstValue != "one" ||
+        encodedValue == null || encodedValue != "value/ok" || bareValue != null ||
         header == null || header != "first") {
         error("request metadata mismatch")
     }
     http.header(res, "X-Remote", http.remoteAddress(req))
+    http.bytes(res, http.bodyBytes(req))
+})
+
+http.post(server, "/abort", fn(req http.Request, res http.Response) void {
+    abortedHandlerCalls = abortedHandlerCalls + 1i64
+    http.end(res)
+})
+http.get(server, "/abort-count", fn(req http.Request, res http.Response) void {
+    http.text(res, str(abortedHandlerCalls))
+})
+http.get(server, "/get-body", fn(req http.Request, res http.Response) void {
     http.bytes(res, http.bodyBytes(req))
 })
 
@@ -43,6 +60,12 @@ http.patch(server, "/method", fn(req http.Request, res http.Response) void { htt
 http.delete(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
 http.options(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
 http.any(server, "/any", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+http.get(server, "/literal:colon", fn(req http.Request, res http.Response) void { http.text(res, "literal") })
+http.get(server, "/empty-header", fn(req http.Request, res http.Response) void {
+    const value str? = http.headerValue(req, "X-Empty")
+    if (value == null || value != "") { error("empty header was not preserved") }
+    http.text(res, "empty")
+})
 
 http.get(server, "/json", fn(req http.Request, res http.Response) void { http.json(res, "true") })
 http.get(server, "/redirect", fn(req http.Request, res http.Response) void { http.redirect(res, "/json", 307i64) })
@@ -55,6 +78,10 @@ http.get(server, "/completed-error", fn(req http.Request, res http.Response) voi
     http.status(res, 201i64)
 })
 http.get(server, "/bad-framing", fn(req http.Request, res http.Response) void { http.header(res, "Content-Length", "5") })
+http.get(server, "/bad-injection", fn(req http.Request, res http.Response) void {
+    http.header(res, "X-Test", http.bodyText(savedRequests[0]))
+})
+http.get(server, "/bad-status", fn(req http.Request, res http.Response) void { http.status(res, 99i64) })
 http.get(server, "/bad-status-body", fn(req http.Request, res http.Response) void {
     http.status(res, 204i64)
     http.text(res, "bad")
@@ -64,6 +91,15 @@ http.get(server, "/bad-query", fn(req http.Request, res http.Response) void {
     if (http.query(req, "value") != null) { error("malformed query was accepted") }
     http.text(res, "null")
 })
+http.get(server, "/custom-content-type", fn(req http.Request, res http.Response) void {
+    http.header(res, "Content-Type", "application/x-mog")
+    http.text(res, "custom")
+})
+http.get(server, "/lifecycle-error", fn(req http.Request, res http.Response) void {
+    http.setMaxBodySize(server, 128i64)
+})
+
+type SocketMarker struct { value i64 }
 
 const socketRoute http.WebSocketRoute = http.createWebSocketRoute()
 var savedSockets Array<http.WebSocket> = []
@@ -76,7 +112,9 @@ http.onOpen(socketRoute, fn(socket http.WebSocket, req http.Request) void {
     if (http.path(req) != "/ws" || http.remoteAddressSocket(socket) == "") {
         error("WebSocket open snapshot mismatch")
     }
-    http.setSocketData(socket, "rooted socket data")
+    const marker SocketMarker = SocketMarker()
+    marker.value = 73i64
+    http.setSocketData(socket, marker)
     savedSockets.push(socket)
     http.sendText(socket, "open")
 })
@@ -86,7 +124,8 @@ http.onText(socketRoute, fn(socket http.WebSocket, message str) void {
         error("intentional WebSocket handler failure")
     }
     if (message == "data") {
-        if (http.socketData(socket) != "rooted socket data") {
+        const marker any = http.socketData(socket)
+        if (marker.value != 73i64) {
             error("socket data identity mismatch")
         }
         http.sendText(socket, "data-ok")
@@ -98,7 +137,9 @@ http.onText(socketRoute, fn(socket http.WebSocket, message str) void {
             http.setSocketData(socket, "replacement-" + str(rootIndex))
             rootIndex = rootIndex + 1i64
         }
-        http.setSocketData(socket, "rooted socket data")
+        const marker SocketMarker = SocketMarker()
+        marker.value = 73i64
+        http.setSocketData(socket, marker)
         http.sendText(socket, "replace-ok")
         return
     }
@@ -124,6 +165,34 @@ http.onText(socketRoute, fn(socket http.WebSocket, message str) void {
         http.sendText(socket, "published")
         return
     }
+    if (message == "publish-binary") {
+        const published bool = http.publishBinary(socket, "room", [0u8, 127u8, 255u8])
+        if (!published) { error("binary publication was not queued") }
+        http.sendText(socket, "binary-published")
+        return
+    }
+    if (message == "invalid-text") {
+        http.sendText(socket, http.bodyText(savedRequests[0]))
+        return
+    }
+    if (message == "invalid-close") {
+        http.close(socket, 1005i64, "reserved")
+        return
+    }
+    if (message == "long-close") {
+        var reason str = ""
+        var reasonIndex i64 = 0i64
+        while (reasonIndex < 124i64) {
+            reason = reason + "x"
+            reasonIndex = reasonIndex + 1i64
+        }
+        http.close(socket, 1000i64, reason)
+        return
+    }
+    if (message == "invalid-close-utf8") {
+        http.close(socket, 1000i64, http.bodyText(savedRequests[0]))
+        return
+    }
     http.sendText(socket, message)
 })
 
@@ -138,7 +207,8 @@ http.onDrain(socketRoute, fn(socket http.WebSocket) void {
 http.onClose(socketRoute, fn(socket http.WebSocket, code i64, reason str) void {
     print("HTTP_WS_CLOSED:" + str(code) + ":" + reason)
     if (code == 4000i64) {
-        if (http.socketData(socket) != "rooted socket data") {
+        const marker any = http.socketData(socket)
+        if (marker.value != 73i64) {
             error("socket data unavailable during close callback")
         }
         http.sendText(socket, "must fail")
@@ -146,6 +216,44 @@ http.onClose(socketRoute, fn(socket http.WebSocket, code i64, reason str) void {
 })
 
 http.websocket(server, "/ws", socketRoute)
+
+const openErrorRoute http.WebSocketRoute = http.createWebSocketRoute()
+http.onOpen(openErrorRoute, fn(socket http.WebSocket, req http.Request) void {
+    error("intentional open failure")
+})
+http.websocket(server, "/ws-open-error", openErrorRoute)
+
+const pressureRoute http.WebSocketRoute = http.createWebSocketRoute()
+http.setMaxBackpressure(pressureRoute, 1024i64)
+http.setCloseOnBackpressureLimit(pressureRoute, false)
+var pressureSawBackpressure bool = false
+var pressureSawDropped bool = false
+var pressureReported bool = false
+http.onOpen(pressureRoute, fn(socket http.WebSocket, req http.Request) void {
+    var payload str = "x"
+    var growth i64 = 0i64
+    while (growth < 16i64) {
+        payload = payload + payload
+        growth = growth + 1i64
+    }
+    var sends i64 = 0i64
+    while (sends < 512i64 && !pressureSawDropped) {
+        const outcome i64 = http.sendText(socket, payload)
+        if (outcome == http.SEND_BACKPRESSURE) { pressureSawBackpressure = true }
+        if (outcome == http.SEND_DROPPED) { pressureSawDropped = true }
+        sends = sends + 1i64
+    }
+    if (!pressureSawBackpressure || !pressureSawDropped) {
+        error("backpressure outcomes were not observed")
+    }
+})
+http.onDrain(pressureRoute, fn(socket http.WebSocket) void {
+    if (!pressureReported && pressureSawBackpressure && pressureSawDropped) {
+        pressureReported = true
+        http.sendText(socket, "pressure-ok")
+    }
+})
+http.websocket(server, "/ws-pressure", pressureRoute)
 
 http.get(server, "/closed-safe", fn(req http.Request, res http.Response) void {
     if (savedSockets.size() == 0 || http.isOpen(savedSockets[0]) ||
@@ -173,4 +281,7 @@ http.get(server, "/stop", fn(req http.Request, res http.Response) void {
 if (!http.listen(server, "127.0.0.1", __PORT__)) { error("could not bind integration server") }
 print("HTTP_FULL_READY")
 http.run(server)
+if (savedSockets.size() > 0 && http.isOpen(savedSockets[savedSockets.size() - 1])) {
+    error("shutdown left retained socket open")
+}
 print("HTTP_FULL_STOPPED")

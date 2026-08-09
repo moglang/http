@@ -6,6 +6,7 @@
 #include "vendor/uSockets/src/libusockets.h"
 #include "websocket.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <iostream>
 #include <limits>
@@ -59,6 +60,7 @@ ServerState::~ServerState() {
   stop();
   if (app) {
     app->close();
+    invalidateActiveStates();
     app.reset();
   }
   releaseCallbacks();
@@ -79,14 +81,8 @@ bool ServerState::addRoute(RouteMethod method, std::string path,
   RouteState route;
   route.method = method;
   route.path = std::move(path);
-  for (size_t index = 0; index < route.path.size();) {
-    if (route.path[index++] != ':')
-      continue;
-    const size_t start = index;
-    while (index < route.path.size() && route.path[index] != '/')
-      ++index;
-    route.parameterNames.push_back(route.path.substr(start, index - start));
-  }
+  if (!routeParameterNames(route.path, route.parameterNames, error))
+    return false;
   if (!retainRoot(host, callback, route.callback, error)) {
     return false;
   }
@@ -187,6 +183,7 @@ bool ServerState::run(std::string &error) {
   listenSocket = nullptr;
   clearActiveServer(*this);
   app->close();
+  invalidateActiveStates();
   releaseCallbacks();
   return true;
 }
@@ -213,6 +210,7 @@ void ServerState::closeNow() {
   listening = false;
   if (app)
     app->close();
+  invalidateActiveStates();
   listenSocket = nullptr;
   stopped = true;
   stopping = false;
@@ -238,8 +236,9 @@ void ServerState::dispatch(size_t routeIndex,
         request->parameters.emplace(name, std::string(value));
     }
     response = std::make_shared<ResponseState>();
+    trackResponse(response);
     response->native = nativeResponse;
-    response->headRequest = routes[routeIndex].method == RouteMethod::Head;
+    response->headRequest = asciiCaseEqual(request->method, "HEAD");
     nativeResponse->onAborted([response]() {
       response->aborted = true;
       response->native = nullptr;
@@ -348,6 +347,44 @@ void ServerState::invokeHttp(
       invalidateResponse(response);
     }
   }
+}
+
+void ServerState::trackResponse(
+    const std::shared_ptr<ResponseState> &response) {
+  activeResponses.erase(
+      std::remove_if(activeResponses.begin(), activeResponses.end(),
+                     [](const auto &weak) { return weak.expired(); }),
+      activeResponses.end());
+  activeResponses.emplace_back(response);
+}
+
+void ServerState::trackSocket(const std::shared_ptr<WebSocketState> &socket) {
+  activeSockets.erase(
+      std::remove_if(activeSockets.begin(), activeSockets.end(),
+                     [](const auto &weak) { return weak.expired(); }),
+      activeSockets.end());
+  activeSockets.emplace_back(socket);
+}
+
+void ServerState::invalidateActiveStates() {
+  for (auto &weak : activeResponses) {
+    if (auto response = weak.lock()) {
+      if (!response->completed)
+        response->aborted = true;
+      response->native = nullptr;
+    }
+  }
+  activeResponses.clear();
+
+  for (auto &weak : activeSockets) {
+    if (auto socket = weak.lock()) {
+      socket->socketData.reset();
+      socket->native = nullptr;
+      socket->open = false;
+      socket->closing = false;
+    }
+  }
+  activeSockets.clear();
 }
 
 void ServerState::releaseCallbacks() {

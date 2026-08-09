@@ -33,7 +33,9 @@ http.run(server)
 routes. Request handles are owned snapshots: method, raw URL/path, headers,
 decoded query values, named parameters, peer address, and body remain readable
 after the callback. The default body limit is 1 MiB and can be changed with
-`setMaxBodySize` before `listen`.
+`setMaxBodySize` before `listen`. `bodyText` copies the exact request bytes into
+a Mog `str` without decoding or UTF-8 validation; use `bodyBytes` when those
+bytes should remain explicitly binary.
 
 Responses stage status and headers until one terminal operation: `text`,
 `bytes`, `json`, `redirect`, or `end`. Text, byte, and JSON responses default to
@@ -41,6 +43,9 @@ the appropriate content type. HEAD responses report the body length without
 sending its bytes. An unfinished handler is completed as 204; a handler error
 before completion becomes a generic 500. Response handles become inactive when
 their callback ends, while `isCompleted` and `isAborted` remain safe.
+An explicit `head` route is not synthesized from `get`; an unmatched HEAD may
+fall through to `any`, where body helpers still report length without sending
+body bytes.
 
 ## WebSockets
 
@@ -80,6 +85,9 @@ own publication, and `true` means at least one eligible subscriber was queued.
 `setSocketData` retains any Mog value with exact object identity across garbage
 collection; the root is released after the close callback. Handler failures in
 open, message, or drain callbacks close the connection with 1011.
+Socket data is available during `onClose` and unavailable after that callback
+returns. Custom WebSocket upgrade authentication or rejection is not part of
+v0.1.0.
 
 ## Execution and lifetime model
 
@@ -89,6 +97,17 @@ background callback thread. Call `stop` before `run`, from a callback, or more
 than once. Shutdown closes listeners and active sockets while callback roots are
 still valid. v0.1.0 has no graceful OS-signal integration; Ctrl+C uses ordinary
 process termination.
+
+```mog
+http.get(server, "/shutdown", fn(req http.Request, res http.Response) void {
+    http.text(res, "shutting down")
+    http.stop(server)
+})
+
+// stop is also idempotent before run.
+// http.stop(server)
+http.run(server)
+```
 
 Calls that need a live socket fail after close begins. `isOpen` and
 `bufferedAmount` remain safe on retained closed handles. Request snapshots stay

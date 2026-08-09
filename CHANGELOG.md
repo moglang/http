@@ -10,3 +10,9 @@
 - Vendor pinned uWebSockets and uSockets sources for offline builds.
 - Add Linux x86_64, Linux ARM64, and macOS ARM64 CI plus standard-library-only
   HTTP/WebSocket integration, GC stress, and sanitizer coverage.
+- Ensure HEAD requests handled by `any` suppress body bytes, parse only
+  segment-leading route parameters, and explicitly invalidate retained active
+  response and WebSocket states during shutdown.
+- Expand lifecycle, abort, body-limit, query/header, fragmentation,
+  backpressure/drain, binary publication, UTF-8, close-validation, and live
+  shutdown integration coverage.
