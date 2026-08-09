@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           repository: moglang/mog
-          ref: main
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           path: .runtime/mog
       - name: Verify tag and manifest version
         shell: bash

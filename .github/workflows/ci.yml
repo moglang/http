@@ -24,13 +24,13 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: linux-x86_64-gnu
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           - runner: ubuntu-24.04-arm
             target: linux-arm64-gnu
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           - runner: macos-14
             target: macos-arm64
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           repository: moglang/mog
-          ref: main
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           path: .runtime/mog
       - name: Build instrumented Mog runtime
         env:
