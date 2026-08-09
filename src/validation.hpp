@@ -16,5 +16,7 @@ bool readI64(const ExprPackageValue &value, int64_t &out,
 bool validRoutePattern(const std::string &pattern, std::string &error);
 bool containsCrLf(std::string_view text);
 bool asciiCaseEqual(std::string_view lhs, std::string_view rhs);
+bool validUtf8(std::string_view text);
+bool validWebSocketCloseCode(int64_t code);
 
 } // namespace mog::http

@@ -2,3 +2,5 @@
 /package.so
 /package.dylib
 /package.dll
+__pycache__/
+*.pyc

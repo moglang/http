@@ -32,6 +32,7 @@ public:
 
   bool invoke(const ExprPackageValue *args, size_t argc,
               ExprPackageValue &result, std::string &error) const;
+  bool get(ExprPackageValue &result, std::string &error) const;
 
 private:
   ExprHostApi api_{};

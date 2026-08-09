@@ -47,6 +47,15 @@ bool PersistentRoot::invoke(const ExprPackageValue *args, size_t argc,
   return true;
 }
 
+bool PersistentRoot::get(ExprPackageValue &result, std::string &error) const {
+  ExprPackageStringView hostError{};
+  if (!api_.getValue(api_.context, value_, &result, &hostError)) {
+    error = copyError(hostError, "Could not retrieve retained Mog value");
+    return false;
+  }
+  return true;
+}
+
 bool retainRoot(const HostBridge &host, const ExprPackageValue &borrowed,
                 std::unique_ptr<PersistentRoot> &out, std::string &error) {
   ExprPersistentValue *retained = nullptr;

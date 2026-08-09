@@ -64,11 +64,61 @@ jobs:
 
   validate:
     if: always()
-    needs: compatibility
+    needs: [compatibility, sanitizers]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Require compatibility matrix
         env:
-          RESULT: ${{ needs.compatibility.result }}
-        run: test "$RESULT" = success
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+          SANITIZER_RESULT: ${{ needs.sanitizers.result }}
+        run: |
+          test "$COMPATIBILITY_RESULT" = success
+          test "$SANITIZER_RESULT" = success
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            mode: asan-ubsan
+          - name: TSan smoke
+            mode: tsan
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: moglang/mog
+          ref: main
+          path: .runtime/mog
+      - name: Build instrumented Mog runtime
+        env:
+          SANITIZER_MODE: ${{ matrix.mode }}
+        run: |
+          if [[ "$SANITIZER_MODE" == "asan-ubsan" ]]; then
+            cmake -S .runtime/mog -B .runtime/mog/build \
+              -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+          else
+            cmake -S .runtime/mog -B .runtime/mog/build \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+              -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread"
+          fi
+          cmake --build .runtime/mog/build --target interpreter --parallel 2
+      - name: Run instrumented package suite
+        env:
+          MOG_HTTP_SANITIZER: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          if [[ "${{ matrix.mode }}" == "tsan" ]]; then
+            sudo sysctl -w vm.mmap_rnd_bits=28
+          fi
+          ./tests/test_http_package.sh ./.runtime/mog/build/interpreter .

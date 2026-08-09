@@ -12,7 +12,20 @@ opaque type Request
 @native_handle("ResponseHandle")
 opaque type Response
 
+@doc("WebSocket route configuration.")
+@native_handle("WebSocketRouteHandle")
+opaque type WebSocketRoute
+
+@doc("A retained, invalidatable WebSocket connection.")
+@native_handle("WebSocketHandle")
+opaque type WebSocket
+
+const SEND_SUCCESS i64
+const SEND_BACKPRESSURE i64
+const SEND_DROPPED i64
+
 fn createServer() Server
+fn setMaxBodySize(server Server, bytes i64) void
 fn listen(server Server, host str, port i64) bool
 fn run(server Server) void
 fn stop(server Server) void
@@ -20,13 +33,55 @@ fn isListening(server Server) bool
 
 fn get(server Server, path str, callback fn(Request, Response) void) void
 fn head(server Server, path str, callback fn(Request, Response) void) void
+fn post(server Server, path str, callback fn(Request, Response) void) void
+fn put(server Server, path str, callback fn(Request, Response) void) void
+fn patch(server Server, path str, callback fn(Request, Response) void) void
+fn delete(server Server, path str, callback fn(Request, Response) void) void
+fn options(server Server, path str, callback fn(Request, Response) void) void
+fn any(server Server, path str, callback fn(Request, Response) void) void
 
 fn method(req Request) str
 fn url(req Request) str
 fn path(req Request) str
+fn headerValue(req Request, name str) str?
+fn query(req Request, name str) str?
+fn param(req Request, name str) str?
+fn remoteAddress(req Request) str
+fn bodyText(req Request) str
+fn bodyBytes(req Request) Array<u8>
 
 fn status(res Response, code i64) void
 fn header(res Response, name str, value str) void
 fn text(res Response, body str) void
+fn bytes(res Response, body Array<u8>) void
+fn json(res Response, jsonText str) void
+fn redirect(res Response, location str, statusCode i64) void
+fn end(res Response) void
 fn isCompleted(res Response) bool
 fn isAborted(res Response) bool
+
+fn createWebSocketRoute() WebSocketRoute
+fn onOpen(route WebSocketRoute, callback fn(WebSocket, Request) void) void
+fn onText(route WebSocketRoute, callback fn(WebSocket, str) void) void
+fn onBinary(route WebSocketRoute, callback fn(WebSocket, Array<u8>) void) void
+fn onDrain(route WebSocketRoute, callback fn(WebSocket) void) void
+fn onClose(route WebSocketRoute, callback fn(WebSocket, i64, str) void) void
+fn setMaxPayloadLength(route WebSocketRoute, bytes i64) void
+fn setMaxBackpressure(route WebSocketRoute, bytes i64) void
+fn setCloseOnBackpressureLimit(route WebSocketRoute, enabled bool) void
+fn setIdleTimeout(route WebSocketRoute, seconds i64) void
+fn websocket(server Server, path str, route WebSocketRoute) void
+
+fn sendText(socket WebSocket, message str) i64
+fn sendBinary(socket WebSocket, message Array<u8>) i64
+fn close(socket WebSocket, code i64, reason str) void
+fn bufferedAmount(socket WebSocket) i64
+fn subscribe(socket WebSocket, topic str) bool
+fn unsubscribe(socket WebSocket, topic str) bool
+fn isSubscribed(socket WebSocket, topic str) bool
+fn publishText(socket WebSocket, topic str, message str) bool
+fn publishBinary(socket WebSocket, topic str, message Array<u8>) bool
+fn remoteAddressSocket(socket WebSocket) str
+fn isOpen(socket WebSocket) bool
+fn setSocketData(socket WebSocket, value any) void
+fn socketData(socket WebSocket) any

@@ -1,0 +1,176 @@
+const http = @import("github.com/moglang/http")
+
+const server http.Server = http.createServer()
+http.setMaxBodySize(server, 64i64)
+
+var savedRequests Array<http.Request> = []
+var savedResponses Array<http.Response> = []
+
+http.post(server, "/echo/:id", fn(req http.Request, res http.Response) void {
+    savedRequests.push(req)
+    savedResponses.push(res)
+    const id str? = http.param(req, "id")
+    const queryValue str? = http.query(req, "q")
+    const emptyValue str? = http.query(req, "empty")
+    const missingValue str? = http.query(req, "missing")
+    const header str? = http.headerValue(req, "X-TeSt")
+    if (id == null || id != "42" || queryValue == null || queryValue != "hello world" ||
+        emptyValue == null || emptyValue != "" || missingValue != null ||
+        header == null || header != "first") {
+        error("request metadata mismatch")
+    }
+    http.header(res, "X-Remote", http.remoteAddress(req))
+    http.bytes(res, http.bodyBytes(req))
+})
+
+http.get(server, "/saved", fn(req http.Request, res http.Response) void {
+    if (savedRequests.size() == 0) {
+        error("request snapshot missing")
+    }
+    http.text(res, http.bodyText(savedRequests[0]))
+})
+
+http.get(server, "/stale", fn(req http.Request, res http.Response) void {
+    if (savedResponses.size() == 0) {
+        error("response snapshot missing")
+    }
+    http.status(savedResponses[0], 201i64)
+    http.text(res, "unreachable")
+})
+
+http.put(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+http.patch(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+http.delete(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+http.options(server, "/method", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+http.any(server, "/any", fn(req http.Request, res http.Response) void { http.text(res, http.method(req)) })
+
+http.get(server, "/json", fn(req http.Request, res http.Response) void { http.json(res, "true") })
+http.get(server, "/redirect", fn(req http.Request, res http.Response) void { http.redirect(res, "/json", 307i64) })
+http.get(server, "/end", fn(req http.Request, res http.Response) void {
+    http.status(res, 202i64)
+    http.end(res)
+})
+http.get(server, "/completed-error", fn(req http.Request, res http.Response) void {
+    http.text(res, "already sent")
+    http.status(res, 201i64)
+})
+http.get(server, "/bad-framing", fn(req http.Request, res http.Response) void { http.header(res, "Content-Length", "5") })
+http.get(server, "/bad-status-body", fn(req http.Request, res http.Response) void {
+    http.status(res, 204i64)
+    http.text(res, "bad")
+})
+http.get(server, "/bad-redirect", fn(req http.Request, res http.Response) void { http.redirect(res, "/", 305i64) })
+http.get(server, "/bad-query", fn(req http.Request, res http.Response) void {
+    if (http.query(req, "value") != null) { error("malformed query was accepted") }
+    http.text(res, "null")
+})
+
+const socketRoute http.WebSocketRoute = http.createWebSocketRoute()
+var savedSockets Array<http.WebSocket> = []
+http.setMaxPayloadLength(socketRoute, 65536i64)
+http.setMaxBackpressure(socketRoute, 1048576i64)
+http.setCloseOnBackpressureLimit(socketRoute, true)
+http.setIdleTimeout(socketRoute, 120i64)
+
+http.onOpen(socketRoute, fn(socket http.WebSocket, req http.Request) void {
+    if (http.path(req) != "/ws" || http.remoteAddressSocket(socket) == "") {
+        error("WebSocket open snapshot mismatch")
+    }
+    http.setSocketData(socket, "rooted socket data")
+    savedSockets.push(socket)
+    http.sendText(socket, "open")
+})
+
+http.onText(socketRoute, fn(socket http.WebSocket, message str) void {
+    if (message == "error") {
+        error("intentional WebSocket handler failure")
+    }
+    if (message == "data") {
+        if (http.socketData(socket) != "rooted socket data") {
+            error("socket data identity mismatch")
+        }
+        http.sendText(socket, "data-ok")
+        return
+    }
+    if (message == "replace-data") {
+        var rootIndex i64 = 0i64
+        while (rootIndex < 1000i64) {
+            http.setSocketData(socket, "replacement-" + str(rootIndex))
+            rootIndex = rootIndex + 1i64
+        }
+        http.setSocketData(socket, "rooted socket data")
+        http.sendText(socket, "replace-ok")
+        return
+    }
+    if (message == "close-now") {
+        http.close(socket, 4000i64, "nested")
+        return
+    }
+    if (message == "subscribe") {
+        http.subscribe(socket, "room")
+        http.sendText(socket, "subscribed")
+        return
+    }
+    if (message == "unsubscribe") {
+        if (!http.unsubscribe(socket, "room") || http.isSubscribed(socket, "room")) {
+            error("unsubscribe failed")
+        }
+        http.sendText(socket, "unsubscribed")
+        return
+    }
+    if (message == "publish") {
+        const published bool = http.publishText(socket, "room", "broadcast")
+        if (!published) { error("publication was not queued") }
+        http.sendText(socket, "published")
+        return
+    }
+    http.sendText(socket, message)
+})
+
+http.onBinary(socketRoute, fn(socket http.WebSocket, message Array<u8>) void {
+    http.sendBinary(socket, message)
+})
+
+http.onDrain(socketRoute, fn(socket http.WebSocket) void {
+    if (http.bufferedAmount(socket) < 0i64) { error("negative buffer") }
+})
+
+http.onClose(socketRoute, fn(socket http.WebSocket, code i64, reason str) void {
+    print("HTTP_WS_CLOSED:" + str(code) + ":" + reason)
+    if (code == 4000i64) {
+        if (http.socketData(socket) != "rooted socket data") {
+            error("socket data unavailable during close callback")
+        }
+        http.sendText(socket, "must fail")
+    }
+})
+
+http.websocket(server, "/ws", socketRoute)
+
+http.get(server, "/closed-safe", fn(req http.Request, res http.Response) void {
+    if (savedSockets.size() == 0 || http.isOpen(savedSockets[0]) ||
+        http.bufferedAmount(savedSockets[0]) != 0i64) {
+        error("retained closed socket state mismatch")
+    }
+    http.text(res, "closed-ok")
+})
+http.get(server, "/send-closed", fn(req http.Request, res http.Response) void {
+    http.sendText(savedSockets[0], "must fail")
+    http.text(res, "unreachable")
+})
+
+var allocationIndex i64 = 0i64
+while (allocationIndex < 50000i64) {
+    const garbage str = "http-callback-root-stress-" + str(allocationIndex)
+    allocationIndex = allocationIndex + 1i64
+}
+
+http.get(server, "/stop", fn(req http.Request, res http.Response) void {
+    http.text(res, "stopping")
+    http.stop(server)
+})
+
+if (!http.listen(server, "127.0.0.1", __PORT__)) { error("could not bind integration server") }
+print("HTTP_FULL_READY")
+http.run(server)
+print("HTTP_FULL_STOPPED")

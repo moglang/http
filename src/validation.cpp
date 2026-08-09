@@ -86,4 +86,48 @@ bool asciiCaseEqual(std::string_view lhs, std::string_view rhs) {
   return true;
 }
 
+bool validUtf8(std::string_view text) {
+  size_t index = 0;
+  while (index < text.size()) {
+    const uint8_t first = static_cast<uint8_t>(text[index++]);
+    if (first <= 0x7f)
+      continue;
+    size_t continuation = 0;
+    uint32_t codepoint = 0;
+    if (first >= 0xc2 && first <= 0xdf) {
+      continuation = 1;
+      codepoint = first & 0x1f;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      continuation = 2;
+      codepoint = first & 0x0f;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      continuation = 3;
+      codepoint = first & 0x07;
+    } else {
+      return false;
+    }
+    if (index + continuation > text.size())
+      return false;
+    for (size_t count = 0; count < continuation; ++count) {
+      const uint8_t byte = static_cast<uint8_t>(text[index++]);
+      if ((byte & 0xc0) != 0x80)
+        return false;
+      codepoint = (codepoint << 6) | (byte & 0x3f);
+    }
+    if ((continuation == 2 && codepoint < 0x800) ||
+        (continuation == 3 && codepoint < 0x10000) || codepoint > 0x10ffff ||
+        (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validWebSocketCloseCode(int64_t code) {
+  if (code >= 3000 && code <= 4999)
+    return true;
+  return code >= 1000 && code <= 1014 && code != 1004 && code != 1005 &&
+         code != 1006;
+}
+
 } // namespace mog::http

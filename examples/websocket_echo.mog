@@ -1,0 +1,27 @@
+const http = @import("github.com/moglang/http")
+
+const server http.Server = http.createServer()
+const route http.WebSocketRoute = http.createWebSocketRoute()
+
+http.onText(route, fn(socket http.WebSocket, message str) void {
+    const result i64 = http.sendText(socket, message)
+    if (result == http.SEND_DROPPED) {
+        print("echo dropped by backpressure policy")
+    }
+})
+
+http.onBinary(route, fn(socket http.WebSocket, message Array<u8>) void {
+    http.sendBinary(socket, message)
+})
+
+http.onClose(route, fn(socket http.WebSocket, code i64, reason str) void {
+    print("socket closed: " + str(code) + " " + reason)
+})
+
+http.websocket(server, "/echo", route)
+
+if (!http.listen(server, "127.0.0.1", 3000i64)) {
+    error("could not bind WebSocket server")
+}
+print("WebSocket echo listening at ws://127.0.0.1:3000/echo")
+http.run(server)
