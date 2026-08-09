@@ -56,7 +56,8 @@ jobs:
           fi
       - name: Build Mog runtime
         run: |
-          cmake -S .runtime/mog -B .runtime/mog/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S .runtime/mog -B .runtime/mog/build \
+            -DCMAKE_BUILD_TYPE=Release -DMOG_VERSION=0.1.6
           cmake --build .runtime/mog/build --parallel
       - name: Build, validate, and test package
         run: |
@@ -101,10 +102,10 @@ jobs:
         run: |
           if [[ "$SANITIZER_MODE" == "asan-ubsan" ]]; then
             cmake -S .runtime/mog -B .runtime/mog/build \
-              -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+              -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6 -DENABLE_ASAN=ON
           else
             cmake -S .runtime/mog -B .runtime/mog/build \
-              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6 \
               -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
               -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
               -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
