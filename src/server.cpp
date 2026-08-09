@@ -256,21 +256,26 @@ void ServerState::dispatch(size_t routeIndex,
       if (parsed.ec != std::errc() || parsed.ptr != end)
         declaredLength = 0;
     }
-    if (declaredLength > maxBodySize) {
-      response->completed = true;
-      nativeResponse->writeStatus("413 Payload Too Large");
-      nativeResponse->writeHeader("Connection", "close");
-      nativeResponse->end("Payload Too Large", true);
-      invalidateResponse(response);
-      return;
-    }
+    const bool declaredTooLarge = declaredLength > maxBodySize;
     if (chunked || declaredLength != 0) {
       const std::shared_ptr<ServerState> self = shared_from_this();
-      nativeResponse->onData([self, routeIndex, request,
-                              response](std::string_view chunk, bool last) {
+      nativeResponse->onData([self, routeIndex, request, response,
+                              bodyTooLarge = declaredTooLarge](
+                                 std::string_view chunk, bool last) mutable {
         if (response->aborted || response->completed)
           return;
-        if (chunk.size() > self->maxBodySize - request->body.size()) {
+
+        if (!bodyTooLarge &&
+            chunk.size() > self->maxBodySize - request->body.size()) {
+          request->body.clear();
+          bodyTooLarge = true;
+        } else if (!bodyTooLarge) {
+          request->body.insert(request->body.end(), chunk.begin(), chunk.end());
+        }
+
+        if (!last)
+          return;
+        if (bodyTooLarge) {
           response->completed = true;
           response->native->writeStatus("413 Payload Too Large");
           response->native->writeHeader("Connection", "close");
@@ -278,9 +283,7 @@ void ServerState::dispatch(size_t routeIndex,
           invalidateResponse(response);
           return;
         }
-        request->body.insert(request->body.end(), chunk.begin(), chunk.end());
-        if (last)
-          self->invokeHttp(routeIndex, request, response);
+        self->invokeHttp(routeIndex, request, response);
       });
       return;
     }

@@ -268,7 +268,14 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
             status, _, body = request(port, "GET", "/bad-query?value=%GG")
             if status != 200 or body != b"null":
                 fail(f"malformed query behavior failed: {status}, {body!r}", process)
-            status, _, _ = request(port, "POST", "/echo/42?q=hello+world&empty=", [("X-Test", "first")], b"x" * 65)
+            status, _, _ = request(
+                port,
+                "POST",
+                "/echo/42?q=hello+world&empty=",
+                [("X-Test", "first")],
+                b"x" * 65,
+                split_body=True,
+            )
             if status != 413:
                 fail(f"body limit failed: {status}", process)
 
