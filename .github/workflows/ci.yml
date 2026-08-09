@@ -24,16 +24,13 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: linux-x86_64-gnu
-            runtime_ref: v0.1.6
-          - runner: ubuntu-latest
-            target: linux-x86_64-gnu
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           - runner: ubuntu-24.04-arm
             target: linux-arm64-gnu
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           - runner: macos-14
             target: macos-arm64
-            runtime_ref: main
+            runtime_ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -59,7 +56,8 @@ jobs:
           fi
       - name: Build Mog runtime
         run: |
-          cmake -S .runtime/mog -B .runtime/mog/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S .runtime/mog -B .runtime/mog/build \
+            -DCMAKE_BUILD_TYPE=Release -DMOG_VERSION=0.1.6
           cmake --build .runtime/mog/build --parallel
       - name: Build, validate, and test package
         run: |
@@ -67,11 +65,87 @@ jobs:
 
   validate:
     if: always()
-    needs: compatibility
+    needs: [compatibility, sanitizers, valgrind]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Require compatibility matrix
         env:
-          RESULT: ${{ needs.compatibility.result }}
-        run: test "$RESULT" = success
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+          SANITIZER_RESULT: ${{ needs.sanitizers.result }}
+          VALGRIND_RESULT: ${{ needs.valgrind.result }}
+        run: |
+          test "$COMPATIBILITY_RESULT" = success
+          test "$SANITIZER_RESULT" = success
+          test "$VALGRIND_RESULT" = success
+
+  valgrind:
+    name: Valgrind smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: moglang/mog
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
+          path: .runtime/mog
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Build Mog runtime
+        run: |
+          cmake -S .runtime/mog -B .runtime/mog/build \
+            -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6
+          cmake --build .runtime/mog/build --target interpreter --parallel 2
+      - name: Run Valgrind smoke suite
+        env:
+          MOG_HTTP_VALGRIND: "1"
+          MOG_HTTP_CHURN_COUNT: "100"
+        run: ./tests/test_http_package.sh ./.runtime/mog/build/interpreter .
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            mode: asan-ubsan
+          - name: TSan smoke
+            mode: tsan
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: moglang/mog
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
+          path: .runtime/mog
+      - name: Build instrumented Mog runtime
+        env:
+          SANITIZER_MODE: ${{ matrix.mode }}
+        run: |
+          if [[ "$SANITIZER_MODE" == "asan-ubsan" ]]; then
+            cmake -S .runtime/mog -B .runtime/mog/build \
+              -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6 -DENABLE_ASAN=ON
+          else
+            cmake -S .runtime/mog -B .runtime/mog/build \
+              -DCMAKE_BUILD_TYPE=Debug -DMOG_VERSION=0.1.6 \
+              -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+              -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread"
+          fi
+          cmake --build .runtime/mog/build --target interpreter --parallel 2
+      - name: Run instrumented package suite
+        env:
+          MOG_HTTP_SANITIZER: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          if [[ "${{ matrix.mode }}" == "tsan" ]]; then
+            sudo sysctl -w vm.mmap_rnd_bits=28
+          fi
+          ./tests/test_http_package.sh ./.runtime/mog/build/interpreter .

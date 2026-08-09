@@ -4,6 +4,7 @@
 #include "validation.hpp"
 
 #include <iostream>
+#include <limits>
 #include <string_view>
 
 namespace mog::http {
@@ -68,6 +69,42 @@ void writeStagedHead(ResponseState &response, int code) {
   }
 }
 
+bool bodyForbidden(int code) {
+  return (code >= 100 && code < 200) || code == 204 || code == 304;
+}
+
+int hexDigit(unsigned char value) {
+  if (value >= '0' && value <= '9')
+    return value - '0';
+  if (value >= 'a' && value <= 'f')
+    return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F')
+    return value - 'A' + 10;
+  return -1;
+}
+
+std::optional<std::string> decodeQueryComponent(std::string_view value) {
+  std::string decoded;
+  decoded.reserve(value.size());
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (value[index] == '+') {
+      decoded.push_back(' ');
+    } else if (value[index] == '%') {
+      if (index + 2 >= value.size())
+        return std::nullopt;
+      const int high = hexDigit(static_cast<unsigned char>(value[index + 1]));
+      const int low = hexDigit(static_cast<unsigned char>(value[index + 2]));
+      if (high < 0 || low < 0)
+        return std::nullopt;
+      decoded.push_back(static_cast<char>((high << 4) | low));
+      index += 2;
+    } else {
+      decoded.push_back(value[index]);
+    }
+  }
+  return decoded;
+}
+
 } // namespace
 
 std::shared_ptr<RequestState> copyRequest(uWS::HttpRequest *request,
@@ -129,16 +166,21 @@ bool stageHeader(const std::shared_ptr<ResponseState> &response,
 
 bool completeText(const std::shared_ptr<ResponseState> &response,
                   std::string body, std::string &error) {
+  return completeBytes(response, body, "text/plain; charset=utf-8", error);
+}
+
+bool completeBytes(const std::shared_ptr<ResponseState> &response,
+                   std::string_view body, std::string_view defaultContentType,
+                   std::string &error) {
   if (!ensureMutable(response, error)) {
     return false;
   }
-  if ((response->statusCode >= 100 && response->statusCode < 200) ||
-      response->statusCode == 204 || response->statusCode == 304) {
+  if (bodyForbidden(response->statusCode)) {
     error = "response status does not permit a body";
     return false;
   }
   if (!hasHeader(*response, "content-type")) {
-    response->headers.emplace_back("Content-Type", "text/plain; charset=utf-8");
+    response->headers.emplace_back("Content-Type", defaultContentType);
   }
   response->completed = true;
   writeStagedHead(*response, response->statusCode);
@@ -148,6 +190,89 @@ bool completeText(const std::shared_ptr<ResponseState> &response,
     response->native->end(body);
   }
   return true;
+}
+
+bool completeRedirect(const std::shared_ptr<ResponseState> &response,
+                      std::string location, int64_t code, std::string &error) {
+  if (!ensureMutable(response, error))
+    return false;
+  if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) {
+    error = "redirect status must be 301, 302, 303, 307, or 308";
+    return false;
+  }
+  if (containsCrLf(location)) {
+    error = "redirect location cannot contain CR/LF";
+    return false;
+  }
+  response->statusCode = static_cast<int>(code);
+  bool replaced = false;
+  for (auto &header : response->headers) {
+    if (asciiCaseEqual(header.first, "location")) {
+      header = {"Location", std::move(location)};
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced)
+    response->headers.emplace_back("Location", std::move(location));
+  response->completed = true;
+  writeStagedHead(*response, response->statusCode);
+  response->native->endWithoutBody();
+  return true;
+}
+
+bool completeEmpty(const std::shared_ptr<ResponseState> &response,
+                   std::string &error) {
+  if (!ensureMutable(response, error))
+    return false;
+  response->completed = true;
+  writeStagedHead(*response, response->statusCode);
+  response->native->endWithoutBody();
+  return true;
+}
+
+std::optional<std::string> requestHeader(const RequestState &request,
+                                         std::string_view name) {
+  for (const auto &header : request.headers) {
+    if (asciiCaseEqual(header.first, name))
+      return header.second;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> requestQuery(const RequestState &request,
+                                        std::string_view name) {
+  const size_t separator = request.url.find('?');
+  if (separator == std::string::npos)
+    return std::nullopt;
+  std::string_view remaining(request.url.data() + separator + 1,
+                             request.url.size() - separator - 1);
+  while (true) {
+    const size_t amp = remaining.find('&');
+    const std::string_view pair = remaining.substr(0, amp);
+    const size_t equals = pair.find('=');
+    if (equals != std::string_view::npos) {
+      const auto key = decodeQueryComponent(pair.substr(0, equals));
+      if (key && *key == name)
+        return decodeQueryComponent(pair.substr(equals + 1));
+    } else {
+      const auto key = decodeQueryComponent(pair);
+      if (key && *key == name)
+        return std::nullopt;
+    }
+    if (amp == std::string_view::npos)
+      break;
+    remaining.remove_prefix(amp + 1);
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> requestParameter(const RequestState &request,
+                                            std::string_view name) {
+  const auto found = request.parameters.find(std::string(name));
+  if (found == request.parameters.end())
+    return std::nullopt;
+  return found->second;
 }
 
 void completeAutomaticNoContent(

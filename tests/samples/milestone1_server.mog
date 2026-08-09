@@ -35,6 +35,10 @@ http.head(server, "/head", fn(req http.Request, res http.Response) void {
     http.text(res, "head-body")
 })
 
+http.post(server, "/default-limit", fn(req http.Request, res http.Response) void {
+    error("oversized body invoked handler")
+})
+
 http.get(server, "/stop", fn(req http.Request, res http.Response) void {
     http.text(res, "stopping")
     http.stop(server)

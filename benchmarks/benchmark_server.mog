@@ -1,0 +1,30 @@
+const http = @import("github.com/moglang/http")
+
+const server http.Server = http.createServer()
+http.get(server, "/plaintext", fn(req http.Request, res http.Response) void {
+    http.text(res, "Hello, World!")
+})
+http.get(server, "/json", fn(req http.Request, res http.Response) void {
+    http.json(res, "true")
+})
+
+const route http.WebSocketRoute = http.createWebSocketRoute()
+http.onOpen(route, fn(socket http.WebSocket, req http.Request) void {
+    http.sendText(socket, "open")
+})
+http.onText(route, fn(socket http.WebSocket, message str) void {
+    http.sendText(socket, message)
+})
+http.onBinary(route, fn(socket http.WebSocket, message Array<u8>) void {
+    http.sendBinary(socket, message)
+})
+http.websocket(server, "/echo", route)
+
+http.get(server, "/stop", fn(req http.Request, res http.Response) void {
+    http.text(res, "stopping")
+    http.stop(server)
+})
+
+if (!http.listen(server, "127.0.0.1", __PORT__)) { error("benchmark bind failed") }
+print("HTTP_BENCHMARK_READY")
+http.run(server)

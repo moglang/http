@@ -4,14 +4,24 @@
 #include "http.hpp"
 #include "validation.hpp"
 #include "vendor/uSockets/src/libusockets.h"
+#include "websocket.hpp"
 
+#include <algorithm>
+#include <charconv>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 
 namespace mog::http {
 namespace {
 
 std::unordered_map<void *, std::weak_ptr<ServerState>> activeServers;
+
+struct CallbackDepthGuard {
+  explicit CallbackDepthGuard(size_t &value) : depth(value) { ++depth; }
+  ~CallbackDepthGuard() { --depth; }
+  size_t &depth;
+};
 
 void clearActiveServer(const ServerState &server) {
   const void *context = server.host.api().context;
@@ -50,6 +60,7 @@ ServerState::~ServerState() {
   stop();
   if (app) {
     app->close();
+    invalidateActiveStates();
     app.reset();
   }
   releaseCallbacks();
@@ -70,6 +81,8 @@ bool ServerState::addRoute(RouteMethod method, std::string path,
   RouteState route;
   route.method = method;
   route.path = std::move(path);
+  if (!routeParameterNames(route.path, route.parameterNames, error))
+    return false;
   if (!retainRoot(host, callback, route.callback, error)) {
     return false;
   }
@@ -87,9 +100,36 @@ bool ServerState::addRoute(RouteMethod method, std::string path,
   };
   if (method == RouteMethod::Get) {
     app->get(routes.back().path, std::move(handler));
-  } else {
+  } else if (method == RouteMethod::Head) {
     app->head(routes.back().path, std::move(handler));
+  } else if (method == RouteMethod::Post) {
+    app->post(routes.back().path, std::move(handler));
+  } else if (method == RouteMethod::Put) {
+    app->put(routes.back().path, std::move(handler));
+  } else if (method == RouteMethod::Patch) {
+    app->patch(routes.back().path, std::move(handler));
+  } else if (method == RouteMethod::Delete) {
+    app->del(routes.back().path, std::move(handler));
+  } else if (method == RouteMethod::Options) {
+    app->options(routes.back().path, std::move(handler));
+  } else {
+    app->any(routes.back().path, std::move(handler));
   }
+  return true;
+}
+
+bool ServerState::setMaxBodySize(int64_t bytes, std::string &error) {
+  if (listening || running || ran || stopping || stopped) {
+    error = "server body limit must be configured before listen";
+    return false;
+  }
+  if (bytes <= 0 ||
+      static_cast<uint64_t>(bytes) >
+          static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    error = "maximum body size must be positive and fit usize";
+    return false;
+  }
+  maxBodySize = static_cast<size_t>(bytes);
   return true;
 }
 
@@ -143,6 +183,7 @@ bool ServerState::run(std::string &error) {
   listenSocket = nullptr;
   clearActiveServer(*this);
   app->close();
+  invalidateActiveStates();
   releaseCallbacks();
   return true;
 }
@@ -152,11 +193,25 @@ void ServerState::stop() {
     return;
   }
   stopping = true;
-  listening = false;
-  if (listenSocket != nullptr) {
-    us_listen_socket_close(0, listenSocket);
-    listenSocket = nullptr;
+  if (callbackDepth != 0 && running) {
+    std::weak_ptr<ServerState> weak = weak_from_this();
+    uWS::Loop::get()->defer([weak]() {
+      if (auto server = weak.lock())
+        server->closeNow();
+    });
+  } else {
+    closeNow();
   }
+}
+
+void ServerState::closeNow() {
+  if (stopped)
+    return;
+  listening = false;
+  if (app)
+    app->close();
+  invalidateActiveStates();
+  listenSocket = nullptr;
   stopped = true;
   stopping = false;
   clearActiveServer(*this);
@@ -175,35 +230,63 @@ void ServerState::dispatch(size_t routeIndex,
 
     const std::shared_ptr<RequestState> request =
         copyRequest(nativeRequest, nativeResponse);
+    for (const std::string &name : routes[routeIndex].parameterNames) {
+      const std::string_view value = nativeRequest->getParameter(name);
+      if (value.data() != nullptr)
+        request->parameters.emplace(name, std::string(value));
+    }
     response = std::make_shared<ResponseState>();
+    trackResponse(response);
     response->native = nativeResponse;
-    response->headRequest = routes[routeIndex].method == RouteMethod::Head;
+    response->headRequest = asciiCaseEqual(request->method, "HEAD");
     nativeResponse->onAborted([response]() {
       response->aborted = true;
       response->native = nullptr;
     });
 
-    ExprPackageValue arguments[] = {
-        makeHandleValue(request, "RequestHandle"),
-        makeHandleValue(response, "ResponseHandle"),
-    };
-    ExprPackageValue callbackResult{};
-    std::string callbackError;
-    ++callbackDepth;
-    const bool callbackOk = routes[routeIndex].callback->invoke(
-        arguments, 2, callbackResult, callbackError);
-    --callbackDepth;
-
-    if (!callbackOk) {
-      std::cerr << "[error][http] " << callbackError << std::endl;
-      completeInternalError(response);
-    } else if (!response->completed && !response->aborted) {
-      std::cerr << "[warning][http] handler returned without completing "
-                   "its response; sending 204"
-                << std::endl;
-      completeAutomaticNoContent(response);
+    const auto contentLength = requestHeader(*request, "content-length");
+    const bool chunked =
+        requestHeader(*request, "transfer-encoding").has_value();
+    size_t declaredLength = 0;
+    if (contentLength) {
+      const char *begin = contentLength->data();
+      const char *end = begin + contentLength->size();
+      const auto parsed = std::from_chars(begin, end, declaredLength);
+      if (parsed.ec != std::errc() || parsed.ptr != end)
+        declaredLength = 0;
     }
-    invalidateResponse(response);
+    const bool declaredTooLarge = declaredLength > maxBodySize;
+    if (chunked || declaredLength != 0) {
+      const std::shared_ptr<ServerState> self = shared_from_this();
+      nativeResponse->onData([self, routeIndex, request, response,
+                              bodyTooLarge = declaredTooLarge](
+                                 std::string_view chunk, bool last) mutable {
+        if (response->aborted || response->completed)
+          return;
+
+        if (!bodyTooLarge &&
+            chunk.size() > self->maxBodySize - request->body.size()) {
+          request->body.clear();
+          bodyTooLarge = true;
+        } else if (!bodyTooLarge) {
+          request->body.insert(request->body.end(), chunk.begin(), chunk.end());
+        }
+
+        if (!last)
+          return;
+        if (bodyTooLarge) {
+          response->completed = true;
+          response->native->writeStatus("413 Payload Too Large");
+          response->native->writeHeader("Connection", "close");
+          response->native->end("Payload Too Large", true);
+          invalidateResponse(response);
+          return;
+        }
+        self->invokeHttp(routeIndex, request, response);
+      });
+      return;
+    }
+    invokeHttp(routeIndex, request, response);
   } catch (const std::exception &exception) {
     std::cerr << "[error][http] native handler exception: " << exception.what()
               << std::endl;
@@ -226,9 +309,91 @@ void ServerState::dispatch(size_t routeIndex,
   }
 }
 
+void ServerState::invokeHttp(
+    size_t routeIndex, const std::shared_ptr<RequestState> &request,
+    const std::shared_ptr<ResponseState> &response) noexcept {
+  try {
+    ExprPackageValue arguments[] = {
+        makeHandleValue(request, "RequestHandle"),
+        makeHandleValue(response, "ResponseHandle"),
+    };
+    ExprPackageValue callbackResult{};
+    std::string callbackError;
+    CallbackDepthGuard callbackGuard(callbackDepth);
+    const bool callbackOk = routes[routeIndex].callback->invoke(
+        arguments, 2, callbackResult, callbackError);
+
+    if (!callbackOk) {
+      std::cerr << "[error][http] " << callbackError << std::endl;
+      completeInternalError(response);
+    } else if (!response->completed && !response->aborted) {
+      std::cerr << "[warning][http] handler returned without completing "
+                   "its response; sending 204"
+                << std::endl;
+      completeAutomaticNoContent(response);
+    }
+    invalidateResponse(response);
+  } catch (const std::exception &exception) {
+    std::cerr << "[error][http] native handler exception: " << exception.what()
+              << std::endl;
+    if (response) {
+      completeInternalError(response);
+      invalidateResponse(response);
+    }
+  } catch (...) {
+    std::cerr << "[error][http] unknown native handler exception" << std::endl;
+    if (response) {
+      completeInternalError(response);
+      invalidateResponse(response);
+    }
+  }
+}
+
+void ServerState::trackResponse(
+    const std::shared_ptr<ResponseState> &response) {
+  activeResponses.erase(
+      std::remove_if(activeResponses.begin(), activeResponses.end(),
+                     [](const auto &weak) { return weak.expired(); }),
+      activeResponses.end());
+  activeResponses.emplace_back(response);
+}
+
+void ServerState::trackSocket(const std::shared_ptr<WebSocketState> &socket) {
+  activeSockets.erase(
+      std::remove_if(activeSockets.begin(), activeSockets.end(),
+                     [](const auto &weak) { return weak.expired(); }),
+      activeSockets.end());
+  activeSockets.emplace_back(socket);
+}
+
+void ServerState::invalidateActiveStates() {
+  for (auto &weak : activeResponses) {
+    if (auto response = weak.lock()) {
+      if (!response->completed)
+        response->aborted = true;
+      response->native = nullptr;
+    }
+  }
+  activeResponses.clear();
+
+  for (auto &weak : activeSockets) {
+    if (auto socket = weak.lock()) {
+      socket->socketData.reset();
+      socket->native = nullptr;
+      socket->open = false;
+      socket->closing = false;
+    }
+  }
+  activeSockets.clear();
+}
+
 void ServerState::releaseCallbacks() {
   for (RouteState &route : routes) {
     route.callback.reset();
+  }
+  for (auto &route : webSocketRoutes) {
+    if (route)
+      route->releaseCallbacks();
   }
 }
 

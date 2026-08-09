@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(mog_http LANGUAGES C CXX)
 
+option(MOG_HTTP_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(MOG_HTTP_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -30,6 +33,7 @@ add_library(mog_http MODULE
     src/host_bridge.cpp
     src/server.cpp
     src/http.cpp
+    src/websocket.cpp
     src/validation.cpp
 )
 target_include_directories(mog_http PRIVATE
@@ -44,3 +48,18 @@ target_compile_definitions(mog_http PRIVATE
 )
 target_link_libraries(mog_http PRIVATE usockets Threads::Threads)
 set_target_properties(mog_http PROPERTIES PREFIX "" OUTPUT_NAME "package")
+
+if(MOG_HTTP_ENABLE_ASAN_UBSAN AND MOG_HTTP_ENABLE_TSAN)
+    message(FATAL_ERROR "ASan/UBSan and TSan cannot be enabled together")
+endif()
+if(MOG_HTTP_ENABLE_ASAN_UBSAN)
+    foreach(target usockets mog_http)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+elseif(MOG_HTTP_ENABLE_TSAN)
+    foreach(target usockets mog_http)
+        target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=thread)
+    endforeach()
+endif()

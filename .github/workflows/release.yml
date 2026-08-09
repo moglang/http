@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           repository: moglang/mog
-          ref: main
+          ref: 7f161c4a77c13b54261b45cefae6782ba2bce9f2
           path: .runtime/mog
       - name: Verify tag and manifest version
         shell: bash
@@ -51,7 +51,8 @@ jobs:
           cmake --build build --config Release --parallel
       - name: Build Mog runtime
         run: |
-          cmake -S .runtime/mog -B .runtime/mog/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S .runtime/mog -B .runtime/mog/build \
+            -DCMAKE_BUILD_TYPE=Release -DMOG_VERSION=0.1.6
           cmake --build .runtime/mog/build --parallel
       - name: Validate package and run tests
         run: ./tests/test_http_package.sh ./.runtime/mog/build/interpreter .
