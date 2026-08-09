@@ -446,7 +446,11 @@ def run_full_suite(mog: Path, package: Path, library: Path) -> None:
                 fail(f"open callback failure was not contained: {close_opcode}, {close_payload!r}", process)
             open_error.close()
 
-            if os.environ.get("MOG_HTTP_VALGRIND") != "1":
+            timing_instrumented = (
+                os.environ.get("MOG_HTTP_VALGRIND") == "1"
+                or os.environ.get("MOG_HTTP_SANITIZER") == "tsan"
+            )
+            if not timing_instrumented:
                 pressure = websocket_connect(port, "/ws-pressure", expect_open=False)
                 time.sleep(0.05)
                 pressure.settimeout(10)
